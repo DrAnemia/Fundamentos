@@ -1,0 +1,586 @@
+---
+title: "Analisis del Comportamiento de los Trayectos en Taxi en la Ciudad de Chicago"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Introducción
+
+
+
+A lo largo de este proyecto, se pretende analizar los datos correspondientes a trayectos de taxis en la ciudad de Chicago durante el año 2016. El dataset original se obtuvo de kaggle y a pesar de que existe información de todo el año, se ha limitado la información a la correspondiente a un par de meses debido al peso de los ficheros.
+
+El objetivo final que se espera conseguir a raíz de estos datos, es ser capaz de predecir, con la máxima precisión posible, el precio de las carreras en función de campos como el origen, destino y el dia de la semana entre otros.
+
+Existe una gran variedad de algoritmos y técnicas de predicción basadas en machine learning. Sin embargo, para el caso de estudio de este proyecto se han utilizado aquellas que se considera que pueden ofrecer un mejor resultado.
+
+Tras una fase de estudio y análisis, los algoritmos selecionados han sido bagging, KNN y un perceptrón multicapa.
+
+
+## Estudio inicial
+
+
+
+Para poder extraer todo el potencial de los datos es necesario conocerlos previamente. Con este fin, se ha realizado un estudio previo para analizar el comportamiento del dataset. 
+
+En un principio el dataframe contenía 20 campos, muchos de los cuales no eran relevantes. Estos campos extra aumentaban considerablemente el tamaño del dataframe, por lo que, después de confirmarse que la información que contenían no aportaba datos de interés, fueron eliminados. Este primer filtrado se llevó a cabo con Python, lo que permitió que también se eliminasen aquellos registros con valores nulos o que contuviesen valores erróneos. Además, se añadieron campos adicionales mediante técnicas de one hot encoding para extraer más información.
+
+Las variables iniciales del dataframe eran las siguientes:
+
+  1. id
+  2. trip_seconds
+  3. fare
+  4. payment_type
+  5. timestamp
+  6. pickup_latitude
+  7. pickup_longitude
+  8. dropoff_latitude
+  9. dropoff_longitude
+  10. distance
+  
+A pesar de haber realizado un filtrado previo con python, todavía existen registros con valores completamente absurdos, por lo que se realizó un segundo filtrado que establece límites a los registros.
+
+
+```{r results='hide', message=FALSE, warning=FALSE}
+
+library(dplyr)
+library(gridExtra)
+library(tidyverse)
+require(ggplot2)
+library(dplyr)
+library(plotly)
+library(imager)
+library(ggimage)
+library(caret)
+library(rsample)
+library(randomForest)
+library(ggpubr)
+library(gapminder)
+library(RSNNS)
+```
+
+```{r}
+
+df_taxi <- read.table(file = 'filtered csv/taxi_informarion_filtered.csv', sep= ',', header = TRUE, na.strings = 'NA', stringsAsFactors = FALSE)
+
+del <- c('X','Unnamed..0')
+
+df_taxi <- df_taxi[ , -which(names(df_taxi) %in% del)]
+
+print('Dimensiones previas al segundo filtrado')
+print(dim(df_taxi))
+
+df_taxi<-df_taxi %>% filter(distance < 50)
+df_taxi<-df_taxi %>% filter(distance > 0)
+df_taxi<-df_taxi %>% filter(trip_seconds < 5400)
+df_taxi<-df_taxi %>% filter(trip_seconds > 0)
+df_taxi<-df_taxi %>% filter(fare < 75)
+df_taxi<-df_taxi %>% filter(fare > 3.25)
+
+print('Dimensiones posteriores al segundo filtrado')
+print(dim(df_taxi))
+```
+
+A partir de la variable timestamp se extrajeron campos como el día de la semana y la hora concreta del viaje. A partir de estos datos, se han generado los histogramas. Se puede ver como no hay información muy relevante en cuanto al método de pago, pero se puede apreciar como el número de viajes aumenta según se acerca el viernes y una vez que llega el fin de semana empieza a descender. En cuanto a las horas, se concentran los viajes en las horas de entrada y salida del trabajo y también a altas horas de la madrugada (se nota que son datos anteriores al covid...).
+
+```{r }
+plot1 <- ggplot(df_taxi, aes(x=hour)) + geom_bar() + ggtitle("Histograma de las horas")
+plot2 <- ggplot(df_taxi, aes(x=week_day)) + geom_bar() + ggtitle("Histograma de los dias de la semana")
+plot3 <- ggplot(df_taxi, aes(x=payment_type)) + geom_bar() + ggtitle("Histograma de los metodos de pago")
+
+grid.arrange(plot1, plot2, plot3, ncol=1)
+```
+
+También puede ser interesante comparar la distribución de los viajes por horas en función de si se trata de un día laborable o festivo. En la siguiente gráfica están representados en azul los días de entre semana y en rojo los viernes sábados y domingos. En general, la forma de las gráficas es muy similar, pero la magnitud es muy diferente. La única franja horaria donde el rojo supera a el azul es durante las madrugadas. De esto se puede extraer que el número de trayectos entre semana es mayor debido a que la gente utiliza taxis como medios de transporte para ir a trabajar. Sin embargo, cuando llega el fin de semana los usuarios utilizan los taxis para moverse a altas horas de la noche, probablemente para volver a sus casas o ir a locales.
+
+```{r}
+taxiwd<-df_taxi%>%filter(df_taxi$week_day=='Monday' | 
+                           df_taxi$week_day=='Tuesday' | 
+                           df_taxi$week_day=='Wednesday' | 
+                           df_taxi$week_day=='Thursday')
+
+taxiwe<-df_taxi%>%filter(df_taxi$week_day=='Friday' |
+                           df_taxi$week_day=='Saturday' |
+                           df_taxi$week_day=='Sunday')
+
+taxiwd <- data.frame(table(taxiwd$hour))
+taxiwe <- data.frame(table(taxiwe$hour))
+
+ggplot() +
+ geom_line(data=taxiwd, aes(x=Var1, y=Freq, group=1), color = 'blue') +
+  geom_point() +
+geom_line(data=taxiwe, aes(x=Var1, y=Freq, group=1), color = 'red') +
+  geom_line(linetype = "dashed")+
+  geom_point()
+```
+
+Es muy interesante analizar la distribución de los orígenes y los finales de las carreras. Para poder estudiar los datos con más claridad se desarrolló un programa en python que permite representar la información mediante mapas de calor sobre google maps. Como se ve en las imágenes los focos, tanto de origen como de destino, están muy concentrados en el centro de la ciudad. También hay focos en los aeropuertos, lo que es coherente con la información. Siguiendo esta línea, se puede afirmar que la mayoría de los turistas aterrizan en el mismo aeropuerto, mientras que para salir de la ciudad se utiliza una mayor variedad de opciones.
+
+```{r }
+pickup = load.image('images/pickup.png')
+dropoff = load.image('images/dropoff.png')
+par(mfrow=c(1, 2))
+plot(pickup, main = "Mapa de calor de origen", axes = FALSE)
+plot(dropoff, main = "Mapa de calor de destino", axes = FALSE)
+
+```
+
+El campo con más potencial del dataset es el campo relativo al precio de las carreras. Como ya se ha mencionado anteriormente, el objetivo final del proyecto es desarrollar un programa que sea capaz de realizar predicciones sobre este campo, por lo que es necesario dedicarle una atención especial.
+
+Como se puede ver, la distribución no es normal, la mayoría de los casos se concentran en torno a los 8 euros por trayecto, pero hay una cola que se alarga bastante e incluso un máximo local en los 45 euros.
+
+```{r}
+hist(df_taxi$fare, n=100)
+```
+
+Es lógico asumir que la variable fare este fuertemente relacionada con los campos de distance y trip_seconds, para confirmar esta teoria se generaron dos nuevas variables que relacionaban estos campos.
+
+```{r }
+df_taxi$tarifa_tiempo<-df_taxi$fare/df_taxi$trip_seconds
+df_taxi$tarifa_distancia<-df_taxi$fare/df_taxi$distance
+
+plot1 <- ggplot(df_taxi, aes(x=c(1:length(row.names(df_taxi))), y=tarifa_tiempo))+ geom_point() + ggtitle('Precio vs Tiempo')
+plot2 <- ggplot(df_taxi, aes(x=c(1:length(row.names(df_taxi))), y=tarifa_distancia)) + geom_point()+ ggtitle('Precio vs Distancia')
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+Como se puede observar en las gráficas anteriores, la gran mayoría de los trayectos estan concentrados por debajo de un umbral. Sin embargo, existen outlayers que señalan claramente la existencia de datos erroneos. Para eliminar estos outlayers se procedió a generar una tercera variable que relacionase los tres campos y se realizo un filtrado a partir de la misma.
+
+```{r }
+tarifa<-df_taxi$fare/(df_taxi$distance*df_taxi$trip_seconds)
+plot(tarifa)
+
+df_taxi<-df_taxi %>% filter(df_taxi$fare/(df_taxi$distance*df_taxi$trip_seconds) < 0.35)
+```
+
+```{r}
+
+plot1 <- ggplot(df_taxi, aes(x=trip_seconds,y=fare)) + geom_point() + ggtitle('Precio vs Tiempo')
+plot2 <- ggplot(df_taxi, aes(x=distance,y=fare)) + geom_point() + ggtitle('Precio vs Distancia')
+grid.arrange(plot1, plot2, ncol=2, top="Comparativa post filtrado")
+```
+
+Mientras que la gráfica del tiempo sigue una estructura bastante lineal a pesar de la varianza, la de la distancia es considerablemente más caótica, lo que significa que el precio de los viajes esta mucho más relacionado con el tiempo del trayecto que con la distancia recorrida. Además, los trayectos en los que la tarifa es elevada en comparación con la distancia, no deben ser considerados como datos erróneos, ya que pueden ser debidos a atascos o accidentes.
+
+
+## Algoritmos
+
+
+
+### KNN
+
+
+
+El método de los k vecinos más cercanos es una técnica de aprendizaje supervisado, lo que significa que se entrena al modelo mediante una gran cantidad de ejemplos en los que se indica cual es el resultado final. En el caso del dataset que se está usando, se indica cual ha sido el precio a pagar por cada viaje.
+
+Al aplicar técnicas supervisadas, es necesario dividir el dataset en dos conjuntos, uno de entrenamiento y otro de test. El conjunto de entrenamiento se usa para enseñar al modelo, mientras que el conjunto de prueba tiene como función medir la calidad de las predicciones. Además, para no menospreciar datos ni generar errores, se debe normalizar los datos, no solo en KNN, si no en cualquier modelo de machine learning.
+
+```{r}
+
+data <- df_taxi[c(0:10)]
+data <- data[c(1,2,4:7,10)]
+
+rows <- sample(nrow(data))
+data <- data[rows, ]
+data <- data[1:50000,]
+
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x))) } 
+
+data<- as.data.frame(lapply(data, normalize)) 
+
+# Separamos los conjuntos de test y entrenamiento 
+dat.d <- sample(1:nrow(data),size=nrow(data)*0.7,
+                replace = FALSE) 
+
+train.gc <- data[dat.d,] # 70% 
+test.gc <- data[-dat.d,] # 30%
+
+train.gc_labels <- data[dat.d,2]
+test.gc_labels  <- data[-dat.d,2]
+
+```
+
+KNN se basa en calcular la distancia euclídea entre los registros y a partir de estas distancias se generan agrupaciones. Estas agrupaciones, son usadas para realizar las predicciones. La librería caret permite desarrollar modelos de forma rápida y sencilla, lo que evita la necesidad de programar desde 0 todas las funcionalidades y permite centrarse en el análisis puro.
+
+```{r}
+model <- caret::train(
+  fare~., data = train.gc, method = "knn",
+  trControl = trainControl("cv", number = 10),
+  preProcess = c("center","scale"),
+  tuneLength = 15
+)
+
+plot(model)
+model$bestTune
+```
+
+El primer paso consiste en estudiar el número de vecinos que se debe usar para alcanzar el mejor resultado posible. Una vez que se ha encontrado este valor, se puede implementar en el modelo y probar los resultados en el conjunto de test. La unidad de medida utilizada para calcular la calidad del servicio es el error cuadrático medio, el cual se muestra a continuación.
+
+```{r}
+predictions <- model %>% predict(test.gc)
+RMSE(predictions, test.gc_labels)
+```
+
+Es necesario tener en cuenta que este resultado, a pesar de ser muy positivo, hace referencia a los datos normalizados, por lo que se deben tratar con precaución. A continuación, se estudia el error absoluto de los resultados mediante histograma.
+
+```{r}
+error<- test.gc_labels-predictions
+
+ggplot(data=data.frame(error), mapping= aes(x=error))+
+  geom_histogram(binwidth=0.005, col=c('blue'))
+
+```
+
+Como se puede ver, la distribución parece seguir una normal de media 0 y sin colas importantes en ningún sentido. Para confirmar este hecho se muestran las siguientes gráficas utilizadas a lo largo de la asignatura para demostrar la normalidad.
+
+```{r}
+{qqnorm(data.frame(error)$error) 
+qqline(data.frame(error)$error)}
+
+```
+
+A primera vista la varianza parece menor a 0.02. De hecho, los outlayers adquieren valores máximos de 0.125, lo que indica que el modelo se adapta bien a la realidad. Seguramente este hecho se deba a que las variables distancia y tiempo están dentro de los parámetros utilizados. 
+
+Este resultado podría mejorarse si se usasen todas las variables disponibles. Sin embargo, esto implicaría aplicar técnicas de one hot encoding, lo que aumentaría considerablemente el tamaño del dataset y se necesitaría una capacidad de procesamiento mayor.
+
+A continuación, se han representado los resultados de forma gráfica. En rojo se encuentran los valores reales de los precios a pagar y en azul las predicciones del modelo.
+
+```{r}
+{plot(test.gc_labels,type = "p",col = "red", xlab = "Sample", 
+     ylab = "Fare", 
+     main = "Fare: Real (rojo) - Predicho (azul)") 
+lines(predictions, type = "p", col = "blue")}
+
+```
+
+Con esta representación se demuestra que el modelo ha adaptado razonablemente bien el caso de estudio. Tanto en los valores reales como en los predichos existe una alta concentración de valores en la franja de 0 a 0.2. A partir de esa cifra los valores son más aleatorios, hasta que se alcanza los 0.6 donde vuelven a concentrarse.
+
+
+### Bagging
+
+
+
+Bagging es una técnica del grupo ensemble. Este tipo de técnica se basa en utilizar varios árboles de clasificación en lugar de uno solo, como se hace con otros algoritmos. De esta forma, se obtienen varios clasificadores que se unifican para conseguir mejorar los atributos de predicción del modelo. En particular, bagging se caracteriza por reducir al mínimo la varianza de los resultados al ir cambiando el subconjunto de datos de prueba. Para lograrlo, se generan varios subconjuntos de datos de entrenamiento de forma que a la salida se tiene en cuenta el clasificador más útil en cada caso.
+
+Esta técnica requiere una capacidad de procesamiento bastante mayor que la empleada durante el desarrollo del modelo de KNN. Es por ello, que se limitó el tamaño del dataset a 50000 muestras para que los tiempos de espera no fuesen excesivos. Al igual que KNN, este algoritmo acepta únicamente variables numéricas, por lo que se ha tenido que prescindir de las categóricas. Sin embargo, con el fin de mejorar la calidad del sistema todo lo posible, se ha aplicado técnicas de one hot enconding sobre los días de la semana, por lo que se obtiene más información sin aumentar excesivamente el volumen de datos (Seguramente sería mucho más útil usar las horas de los trayectos, pero eso haría que el tamaño del dataset se cuadriplicara).
+
+A continuación, se puede observar el resultado de las predicciones del conjunto de entrenamiento utilizando 500 árboles (valor por defecto de la función). A primera vista la calidad del modelo parece ser superior a la del apartado anterior, pero más adelante se contrastará esta apreciación. Otro aspecto sobre el que se trabajará es analizar el rendimiento del modelo utilizando distintos parámetros. El objetivo será simplificar el modelo sin repercutir en la calidad de los resultados.
+
+
+```{r}
+data <- df_taxi[c(c(1,2,4:7,10,18:24))]
+data <- data[1:50000,]
+
+data_split<- initial_split(data, prop=0.8)
+data_train<- training(data_split)
+data_test<- testing(data_split)
+
+bagging_model<- randomForest(formula=fare  ~ ., data=data_train, 
+                    mtry=13, importance=TRUE)
+
+pred_train <- predict(bagging_model, newdata = data_train)
+
+{plot(data_train$fare,type = "p",col = "red", xlab = "Sample", ylab = "fare Value", 
+     main = "fare: Real (rojo) - Predicho (azul)")
+lines(pred_train, type = "p", col = "blue")}
+
+```
+
+El error residual parece pequeño. Sin embargo, existen casos en los que la predicción ha errado por casi 20 euros, lo que es inaceptable para el sistema. En cualquier caso, estas situaciones son muy escasas, por lo que el resultado del error cuadrático medio es muy bajo.
+
+```{r}
+res_train<-data_train$fare-pred_train
+p1 <- ggplot(data=data.frame(res_train), mapping= aes(x=c(1:length(row.names(data_train))), y=res_train)) +
+  geom_point(aes(colour = 'red'),show.legend = FALSE) +
+  ggtitle("Error residual")
+p2 <- ggplot(data=data.frame(res_train), mapping= aes(x=res_train))+
+  geom_histogram(binwidth=0.5, col=c('blue'))
+
+ggarrange(p1,p2)
+```
+
+```{r}
+
+mse_train <-mean((res_train)^2)  
+
+paste("El error cuadrático medio del conjunto de entrenamiento es ", 
+      round(mse_train,2))
+
+```
+
+Los buenos resultados con el conjunto de entrenamiento no son suficientes, ya que existe el riesgo de que el modelo haya sobreaprendido de los datos y no ofrezca buenas soluciones cuando haga frente a nueva información.
+
+```{r}
+#Prediction of the test cases from the test dataset
+pred_test <- predict(bagging_model, newdata = data_test)
+
+# Plotting the real and estimated values. (p point, l lines, o both)
+{plot(data_test$fare,type = "p",col = "red", xlab = "Sample", ylab = "fare Value", 
+     main = "fare: Real (red) - Predicted (blue)")
+lines(pred_test, type = "p", col = "blue")}
+
+```
+
+```{r}
+
+res_test<-data_test$fare-pred_test
+
+# Plotting residuals. (p point, l lines, o both)
+plot(res_test,type = "p",col = "red", xlab = "Sample", ylab = "Residual Value", 
+     main = "fare Value: Real - Predicted Values")
+
+p1 <- ggplot(data=data.frame(res_test), mapping= aes(x=c(1:length(row.names(data_test))), y=res_test)) +
+  geom_point(aes(colour = 'red'),show.legend = FALSE) +
+  ggtitle("Error residual")
+p2 <- ggplot(data=data.frame(res_test), mapping= aes(x=res_test))+
+  geom_histogram(binwidth=0.5, col=c('blue'))
+
+ggarrange(p1,p2)
+
+```
+
+Como se puede ver en los gráficos anteriores, la situación en el conjunto de test parece similar a la del entrenamiento. Aunque bien es cierto que los outlayers en el error residual han aumentado de magnitud, el ECM sigue siendo muy bueno.
+
+```{r}
+mse_test <-mean((res_test)^2)  
+
+print(paste('El error cuadrático medio del conjunto de test es ', round(mse_test,2),sep=''))
+```
+
+Es llamativo que un modelo con un error tan bajo contenga unos outlayers tan elevados, por lo que se decidió estudiar con mayor detenimiento los casos. Asumiendo que a un usuario medio no le importaría un error inferior a 5 euros, se ha utlizado esta cifra como valor límite para el filtrado.
+
+```{r}
+data_test$error <- data_test$fare-pred_test
+error_outlayer <- data_test %>% filter(error > 5 | error < -5)
+error_outlayer$trip_seconds <- error_outlayer$trip_seconds/60
+
+error_outlayer %>%
+  arrange(desc(error)) %>%
+  ggplot(aes(x=trip_seconds, y=distance, size = error)) +
+    geom_point(alpha=0.5) +
+    scale_size(range = c(.1, 24), name="Error calculado")
+
+```
+
+Inicialmente se consideró que con un gráfico de burbujas se podría extraer algún tipo de patrón. Sin embargo, como se puede ver en la imagen superior, esta representación no aporta ninguna pista sobre el motivo del error. Los rangos de tiempo y distancia abarcan todo el espectro y no parece haber una explicación clara.
+
+Llegados a este punto, se decidió estudiar la velocidad media de los casos para intentar encontrar situaciones en las que la velocidad fuese muy elevada o muy baja. Como resultado del estudio se obtuvo la siguiente imagen, donde se ve claramente que hay un ingente número de casos donde la velocidad media es muy cercana al 0. 
+
+Esto se podría relacionar con datos corruptos o con situaciones como atascos, donde se pasa una gran cantidad de tiempo parado, pero al no haber encontrado ningún patrón o pista que separe estos conjuntos, no se pueden eliminar los registros, ya que se perdería información. Es por estos motivos, que no se puede realizar un filtrado basado en este principio, por lo que hay que aceptar estos outlayers.
+
+```{r}
+error_outlayer$speed <- error_outlayer$distance/(error_outlayer$trip_seconds/60)
+plot(error_outlayer$speed)
+ggplot(data=error_outlayer, mapping= aes(x=speed))+
+  geom_histogram(binwidth=0.5, col=c('blue')) 
+
+```
+
+Como se comentó anteriormente, el siguiente paso consistió en simplificar el modelo para hacerlo menos pesado. Este objetivo se puede alcanzar mediante 2 métodos diferenciados. El primero consiste en estudiar las aportaciones de cada variable para el modelo y escoger aquellas que son realmente útiles. La segunda estrategia es analizar la reducción del error en función del número de árboles utilizados hasta que este campo se estabilice.
+
+La importancia de las variables se puede estudiar mediante su aportación a la reducción del error del modelo y mediante la pureza de los nodos de los árboles.
+
+```{r}
+importance_pred <- as.data.frame(importance(bagging_model, 
+                                            scale = TRUE))
+importance_pred <- rownames_to_column(importance_pred, 
+                                      var = "variable")
+
+p1 <- ggplot(data = importance_pred, 
+             aes(x = reorder(variable, `%IncMSE`), 
+                 y = `%IncMSE`, fill = `%IncMSE`)) +
+  labs(x = "variable", title = "MSE Reduction") +
+  geom_col() +
+  coord_flip() +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+p2 <- ggplot(data = importance_pred, 
+             aes(x = reorder(variable, IncNodePurity), 
+                 y = IncNodePurity, fill = IncNodePurity)) +
+  labs(x = "variable", title = "Purity Reduction") +
+  geom_col() +
+  coord_flip() +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+ggarrange(p1,p2)
+
+```
+
+Como se puede ver, las variables más útiles para reducir el error cuadrático medio son aquellas que se utilizaron en el modelo KNN. Por otro lado, la pureza de los nodos esta claramente definido por las variables tiempo y distancia. Ambos resultados son muy lógicos. En primer lugar, se sabía desde el principio que el día de la semana era completamente independiente a los precios y al número de viajes. Y en cuanto al tiempo y la distancia, son los parámetros que más influyen en la tarifa.
+
+En cuanto al número adecuado de árboles, se aprecia como el error se estabiliza rápidamente al rededor de 100, pero con el fin de asegurar un buen resultado se optó por escoger un término medio y usar 200 árboles.
+
+```{r}
+
+oob_mse<-data.frame(oob_mse=bagging_model$mse,
+                    trees=seq_along(bagging_model$mse))
+ggplot(data=oob_mse, aes(x=trees, y=oob_mse))+
+  geom_line()+
+  labs(title = "OOB vs Número de arboles", x="Número de arboles")+
+  theme_bw()
+```
+
+Con estos nuevos parámetros se diseñó el nuevo modelo, que cuenta con las siguientes caracteristicas:
+
+```{r}
+
+new_data <- data[c(1:7)]
+data_split<- initial_split(new_data, prop=0.8)
+data_train<- training(data_split)
+data_test<- testing(data_split)
+
+
+bagging_model_200<- randomForest(formula=fare  ~ ., data=data_train, 
+                                         mtry=6, ntree=200,
+                                         importance=TRUE) 
+print(bagging_model_200)
+```
+
+Como se puede observar, el resultado del modelo simplificado es similar al obtenido con el modelo completo. Además, el tiempo de procesamiento se ha reducido considerablemente y el modelo se ha simplificado. 
+
+```{r}
+pred_test <- predict(bagging_model_200, newdata = data_test)
+mse_test <-mean((res_test)^2) 
+print(paste('El error cuadrático medio del nuevo modelo es ', round(mse_test,2),sep=''))
+```
+
+
+### Perceptrón Multicapa
+
+
+
+Un perceptrón multicapa es una red neuronal compuesta por 3 capas como mínimo. Estas capas se dividen en una de entrada, una de salida y N capas ocultas.
+
+La arquitectura del perceptrón multicapa se caracteriza por su capacidad como aproximador universal, así como su fácil uso y aplicabilidad. Sin embargo, posee una serie de limitaciones, como el largo proceso de aprendizaje para problemas complejos dependientes de un gran número de variables, la dificultad para realizar un análisis teórico de la red, debido a la presencia de componentes no lineales y la alta conectividad. Es por ello que fue necesario limitar el número de elementos del dataset a 50000 ejemplos para poder reducir el tiempo de procesamiento.
+
+```{r}
+
+inputs<-data[,c(1,3:14)]
+target<-data[,2]
+
+
+inputs_norm<-normalizeData(inputs, type="0_1")
+target_norm<-normalizeData(target, type="0_1")
+
+sets<-splitForTrainingAndTest(inputs_norm,target_norm,ratio=0.15)
+
+mlp_model<-mlp(sets$inputsTrain, sets$targetsTrain, size=c(5,5),
+               initFunc="Randomize_Weights",
+               initFuncParams=c(-0.3, 0.3),
+               learnFunc="Std_Backpropagation",
+               learnFuncParams=c(0.2, 0.0),
+               maxit = 350,
+               updateFunc="Topological_Order",
+               hiddenActFunc="Act_Logistic",
+               linOut=TRUE,
+               inputsTest = sets$inputsTest, 
+               targetsTest = sets$targetsTest)
+
+```
+
+Una vez se generó este nuevo modelo, se procedió a representar la reducción del error según las iteraciones. Se puede apreciar como al principio el cambio es muy brusco y luego la curva se va suavizando. Alrededor de la iteración número 200 el modelo se estabiliza y aunque sigue bajando, el cambio no es significativo.
+
+```{r}
+pred_ts_norm <- predict(mlp_model, sets$inputsTest)
+
+plotIterativeError(mlp_model)
+
+```
+
+A continuación, se procedió a realizar predicciones. El resultado es bastante similar a los casos representados con los modelos anteriores, donde la concentración de casos impedía hacerse una idea clara de los resultados. Es por ello que se decidió, en este caso, limitar el número de muestras representadas a 20. Las muestra en rojo son los valores reales y los azules las predicciones.
+
+```{r}
+
+pred_tr_norm <- predict(mlp_model, sets$inputsTrain)
+
+pred_tr_denorm <-denormalizeData(pred_tr_norm, 
+                                 getNormParameters(target_norm))
+  
+target_tr_denorm<- denormalizeData(sets$targetsTrain, 
+                            getNormParameters(target_norm))
+
+predictions <- data.frame(pred_tr_denorm, target_tr_denorm)
+predictions <- predictions[0:20,]
+
+ggplot() +
+  geom_point(data = predictions, aes(x = c(1:length(rownames(predictions))), y = pred_tr_denorm), color = 'blue') +
+  geom_point(data = predictions, aes(x = c(1:length(rownames(predictions))), y = target_tr_denorm), color = 'red') + 
+  labs(title="Reales Vs Predichos", y="Fare", x="Registros")
+
+```
+
+Utilizando menos muestras se ve con mayor calidad lo que está pasando. Al analizar el histograma se puede apreciar que el error sigue una normal de media 0 y con colas que se estabilizan rápidamente. El ECM obtenido es de 2,5 euros. A priori es peor que el obtenido con bagging, pero hay que tener en cuenta que en ese algoritmo el modelo sufría un sobre aprendizaje.
+
+```{r}
+error_tr<-target_tr_denorm - pred_tr_denorm
+
+ggplot(data=as.data.frame(error_tr), mapping= aes(x=error_tr))+
+  geom_histogram(binwidth=0.5, col=c('blue')) 
+  
+```
+
+```{r}
+res_test<-target_tr_denorm-pred_tr_denorm
+ 
+MSE.nn <- mean((res_test)^2)
+paste('El error cuadrático medio del conjunto de entrenamiento es de ', MSE.nn, sep='')
+```
+
+El siguiente paso consiste en analizar el conjunto de test. A pesar de que el perceptrón no ha sido capaz de superar a bagging, sigue ofreciendo unos resultados muy buenos, por lo que si el error de test no difiriese en exceso del de entrenamiento, se podría considerar que este modelo es superior.
+
+```{r}
+
+pred_ts_norm <- predict(mlp_model, sets$inputsTest)
+
+pred_ts_denorm <-denormalizeData(pred_ts_norm, 
+                                 getNormParameters(target_norm))
+target_ts_denorm<- denormalizeData(sets$targetsTest, 
+                                   getNormParameters(target_norm))
+error_ts<-target_ts_denorm-pred_ts_denorm
+
+ggplot(data=as.data.frame(error_ts), mapping= aes(x=error_ts))+
+  geom_histogram(binwidth=0.5, col=c('blue'))
+
+```
+
+El histograma parece similar al del conjunto de entrenamiento, con la diferencia de que la cola de la izquierda es mayor. Para profundizar en el análisis se ha incluido una comparativa de los boxplots. Efectivamente en ambos casos la media está centrada en el 0 y la varianza es pequeña. Aun así, existen outlayers en ambos casos. En el entrenamiento el mayor error esta provocado por quedarse corto, mientras que en el de test ocurre lo contrario. Ambas situaciones estén debidas, seguramente, a los atascos que se encontraron en el apartado anterior.
+
+```{r}
+tr <- stack(as.data.frame(error_tr))
+ts <- stack(as.data.frame(error_ts))
+p1 <- ggplot(data=tr, mapping= aes(x = ind, y = values))+
+  geom_boxplot(outlier.colour="red", outlier.shape=16) +
+  ggtitle('Boxplot del error de entrenamiento')
+p2 <-  ggplot(data=ts, mapping= aes(x = ind, y = values))+
+  geom_boxplot(outlier.colour="blue", outlier.shape=16) +
+  ggtitle('Boxplot del error de test')
+ggarrange(p1,p2)
+
+```
+
+
+```{r}
+MSE.nn_ts <- sum((error_ts)^2)/nrow(error_ts)
+paste('El error cuadrático medio del conjunto de test es de ', MSE.nn_ts, sep= '')
+```
+
+Este resultado es muy similar al del entrenamiento, por lo que se puede afirmar que el modelo no sufre de sobreaprendizaje.
+
+
+## Conclusión
+
+
+
+A lo largo del proyecto se ha visto que cada uno de los algoritmos cuanta con sus puntos fuertes y débiles. KNN ofrece el modelo más sencillo y que requiere una menor capacidad de procesamiento, pero a cambio es el que peores resultados ofrece de los tres. La técnica de bagging devuelve un error muy pequeño, pero tiene un sobreaprendizaje que a la larga podría generar problemas. Y finalmente, el perceptrón no es tan fiable como el bagging, pero no sufre sobreaprendizaje.
+
+Debido a todos estos motivos, sería necesario considerar las prioridades del proyecto antes de decidir por que método optar. Seguramente lo mejor sería quedarse con uno de los dos últimos y descartar KNN, pero, aun así, es necesario tomar decisiones de cara al modelo de negocio. Si se fuese a desarrollar una app que tuviese como público objetivo los clientes de taxi y les ofreciese estimaciones, lo mejor sería optar por el perceptrón multicapa, ya que un error de dos euros no es apreciable. Sin embargo, si la aplicación se enfoca a los taxistas, sería mejor reducir el error al mínimo, ya que en este tipo de aplicaciones son los conductores los que pagan la diferencia en caso de que la carrera sea más cara de lo que se propuso inicialmente.
+
+Personalmente, consideró que el modelo debe ser lo más robusto posible. El sobreaprendizaje no debe subestimarse y puede ser fuente de problemas graves. Además, el modelo de MLP puede ser entrenado con más datos y utilizando técnicas de one hot encoding, por lo que su margen de mejora es grande. Es por estos motivos, que se ha considerado que este es el modelo que mejor se adapta a la realidad y aquel que se debería implementar si el objetivo fuese puramente académico.
+
